@@ -1,0 +1,13 @@
+# Lambda container image for the API. This image also runs fine locally via
+# `docker run -p 9000:8080 ... ` + the Lambda Runtime Interface Emulator
+# (built into this base image) if you want to smoke-test the exact deploy
+# artifact without a real Lambda invocation.
+FROM public.ecr.aws/lambda/python:3.12
+
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
+
+COPY app ${LAMBDA_TASK_ROOT}/app
+COPY lambda_handler.py ${LAMBDA_TASK_ROOT}/
+
+CMD ["lambda_handler.handler"]

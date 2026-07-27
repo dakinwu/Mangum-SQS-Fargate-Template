@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  API on AWS Lambda (Mangum) behind API Gateway REST API.
+  RestApi (v1) is used deliberately, not HttpApi (v2): only v1 supports
+  native ApiKey + UsagePlan authentication, so auth is enforced entirely at
+  the gateway - the app itself carries no auth code and stays deployable
+  behind any auth scheme without a code change.
+  The worker (poll_loop) runs separately (see infra/fargate.yaml).
+
+Parameters:
+  Env:
+    Type: String
+    Default: local
+    Description: Suffix used for all resource names (e.g. dev, prod).
+  ApiLambdaRoleArn:
+    Type: String
+    Default: ""
+    Description: Pre-created IAM role ARN for the Lambda execution. Leave empty for sam local.
+  SqsQueueUrl:
+    Type: String
+    Default: ""
+    Description: SQS queue URL the API enqueues tasks to.
+  RuntimeEnv:
+    Type: String
+    Default: local
+    AllowedValues: [local, dev, prod]
+    Description: Value used as the ENV environment variable inside the function.
+  ImageUri:
+    Type: String
+    Default: ""
+    Description: Full ECR image URI for the Lambda function (built from Dockerfile.api).
+
+Conditions:
+  HasRoleArn: !Not [!Equals [!Ref ApiLambdaRoleArn, ""]]
+  HasImageUri: !Not [!Equals [!Ref ImageUri, ""]]
+
+Resources:
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub template-api-${Env}
+      StageName: !Ref RuntimeEnv
+      EndpointConfiguration:
+        Type: REGIONAL
+      Auth:
+        ApiKeyRequired: true
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: !Sub template-api-${Env}-usage-plan
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub template-api-${Env}
+      PackageType: Image
+      ImageUri: !If [HasImageUri, !Ref ImageUri, !Ref AWS::NoValue]
+      MemorySize: 512
+      Timeout: 30
+      Role: !If [HasRoleArn, !Ref ApiLambdaRoleArn, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          ENV: !Ref RuntimeEnv
+          SQS_QUEUE_URL: !Ref SqsQueueUrl
+          DISABLE_POLLER: "true"
+          # API Gateway exposes the function under a stage path (e.g.
+          # "/dev"); FastAPI needs root_path to generate correct absolute
+          # URLs in the Swagger UI HTML.
+          API_ROOT_PATH: !Sub "/${RuntimeEnv}"
+      Events:
+        # Swagger/OpenAPI routes: no API key required, matched before the
+        # {proxy+} catch-all (API Gateway uses most-specific-match). In
+        # prod, app/main.py sets docs_url=None so these routes don't even
+        # exist inside FastAPI (defense in depth).
+        DocsEvent:
+          Type: Api
+          Properties: { RestApiId: !Ref ApiGateway, Path: /docs, Method: GET, Auth: { ApiKeyRequired: false } }
+        RedocEvent:
+          Type: Api
+          Properties: { RestApiId: !Ref ApiGateway, Path: /redoc, Method: GET, Auth: { ApiKeyRequired: false } }
+        OpenApiJsonEvent:
+          Type: Api
+          Properties: { RestApiId: !Ref ApiGateway, Path: /openapi.json, Method: GET, Auth: { ApiKeyRequired: false } }
+        # All other paths: API key required (inherits stage default).
+        ApiEvent:
+          Type: Api
+          Properties: { RestApiId: !Ref ApiGateway, Path: /{proxy+}, Method: ANY }
+        RootEvent:
+          Type: Api
+          Properties: { RestApiId: !Ref ApiGateway, Path: /, Method: ANY }
+
+Outputs:
+  ApiUrl:
+    Description: Public REST API endpoint (includes stage path)
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${RuntimeEnv}"
+  FunctionName:
+    Value: !Ref ApiFunction

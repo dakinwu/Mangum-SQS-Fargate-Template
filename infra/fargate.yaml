@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  SQS worker on AWS Fargate. Pairs with template.yaml (the API Lambda). Both
+  share the same SQS queue but deploy independently - this is a deliberate
+  split: the worker's scale/restart/deploy lifecycle has nothing to do with
+  the API's, and running it on Lambda would fight the platform (a worker's
+  whole job is to run forever, not respond-and-exit).
+
+Parameters:
+  Env:
+    Type: String
+    Description: Suffix used for all resource names (e.g. dev, prod).
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI for the worker container (built from Dockerfile.worker).
+  TaskRoleArn:
+    Type: String
+    Description: IAM role for the running container (needs SQS receive/delete/send + DB access).
+  ExecutionRoleArn:
+    Type: String
+    Description: IAM role for ECS to pull the image and write CloudWatch Logs.
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: Private subnets for the Fargate task ENIs.
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: Security groups attached to the task (must allow egress to SQS + RDS).
+  ClusterName:
+    Type: String
+    Default: template-cluster
+  RuntimeEnv:
+    Type: String
+    Default: dev
+    AllowedValues: [local, dev, prod]
+  SqsQueueUrl:
+    Type: String
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Number of worker tasks. Scale based on SQS queue depth (ApproximateNumberOfMessagesVisible).
+  TaskCpu:
+    Type: String
+    Default: "512"
+  TaskMemory:
+    Type: String
+    Default: "1024"
+
+Resources:
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/template-worker-${Env}
+      RetentionInDays: 30
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub template-worker-${Env}
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      TaskRoleArn: !Ref TaskRoleArn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref ImageUri
+          Essential: true
+          StopTimeout: 90
+          Environment:
+            - Name: ENV
+              Value: !Ref RuntimeEnv
+            - Name: SQS_QUEUE_URL
+              Value: !Ref SqsQueueUrl
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  WorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub template-worker-${Env}
+      Cluster: !Ref ClusterName
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref WorkerTaskDefinition
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 200
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: !Ref SecurityGroupIds
+          AssignPublicIp: DISABLED
+
+Outputs:
+  ServiceName:
+    Value: !Ref WorkerService
+  TaskDefinitionArn:
+    Value: !Ref WorkerTaskDefinition
+  LogGroup:
+    Value: !Ref WorkerLogGroup

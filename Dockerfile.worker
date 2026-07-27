@@ -1,0 +1,19 @@
+# Worker image (Fargate/ECS, or any container/VM). No HTTP server, no port
+# exposed - it's a pure background process. That's the point: the worker's
+# lifecycle (deploy, scale, restart) is entirely independent of the API's.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+COPY worker_entry.py ./
+
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-u", "-m", "worker_entry"]
